@@ -156,6 +156,132 @@ export const injectExtensionAPIs = () => {
       }
     }
 
+    /**
+     * Matches a URL against a Chrome extension match pattern.
+     *
+     * @see https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns
+     */
+    const matchesUrlPattern = (pattern: string, url: string): boolean => {
+      if (pattern === '<all_urls>') return true
+
+      const patternParts = /^(\*|[a-z][a-z0-9+.-]*):\/\/(\*|(?:\*\.)?[^/*]+|)(\/.*)$/.exec(pattern)
+      if (!patternParts) return false
+      const [, patternScheme, patternHost, patternPath] = patternParts
+
+      let urlParts: URL
+      try {
+        urlParts = new URL(url)
+      } catch {
+        return false
+      }
+
+      const scheme = urlParts.protocol.slice(0, -1)
+      if (patternScheme === '*') {
+        if (scheme !== 'http' && scheme !== 'https') return false
+      } else if (scheme !== patternScheme) {
+        return false
+      }
+
+      const host = urlParts.hostname
+      if (patternHost !== '*') {
+        if (patternHost.startsWith('*.')) {
+          const domain = patternHost.slice(2)
+          if (host !== domain && !host.endsWith(`.${domain}`)) return false
+        } else if (host !== patternHost) {
+          return false
+        }
+      }
+
+      const escapePattern = (subpattern: string) => subpattern.replace(/[\\^$+?.()|[\]{}]/g, '\\$&')
+      const pathRegExp = new RegExp(`^${patternPath.split('*').map(escapePattern).join('.*')}$`)
+      return pathRegExp.test(urlParts.pathname + urlParts.search)
+    }
+
+    interface WebRequestDetails {
+      url: string
+      type: string
+      tabId: number
+      requestHeaders?: unknown
+      responseHeaders?: unknown
+      requestBody?: unknown
+    }
+
+    const matchesRequestFilter = (
+      details: WebRequestDetails,
+      filter?: chrome.webRequest.RequestFilter,
+    ): boolean => {
+      if (!filter) return true
+      if (
+        filter.urls &&
+        filter.urls.length > 0 &&
+        !filter.urls.some((pattern) => matchesUrlPattern(pattern, details.url))
+      ) {
+        return false
+      }
+      if (filter.types && filter.types.length > 0 && !filter.types.includes(details.type as any)) {
+        return false
+      }
+      // NOTE: filter.windowId is not supported.
+      if (typeof filter.tabId === 'number' && details.tabId !== filter.tabId) {
+        return false
+      }
+      return true
+    }
+
+    /**
+     * Event type for chrome.webRequest events.
+     *
+     * Listener callbacks are filtered locally based on the provided
+     * RequestFilter and extraInfoSpec.
+     *
+     * NOTE: This implementation is observational only. The 'blocking'
+     * extraInfoSpec is ignored and any value returned by listeners has no
+     * effect on the request.
+     */
+    class WebRequestEvent {
+      private listenerMap = new Map<Function, Function>()
+
+      constructor(private name: string) {}
+
+      addListener(
+        callback: Function,
+        filter?: chrome.webRequest.RequestFilter,
+        extraInfoSpec: string[] = [],
+      ) {
+        const listener = (details: WebRequestDetails) => {
+          if (!matchesRequestFilter(details, filter)) return
+
+          // Headers and request bodies are always sent by the main process.
+          // Remove any which weren't requested by the extraInfoSpec.
+          // NOTE: 'blocking' and 'extraHeaders' are intentionally ignored.
+          const listenerDetails = { ...details }
+          if (!extraInfoSpec.includes('requestHeaders')) delete listenerDetails.requestHeaders
+          if (!extraInfoSpec.includes('responseHeaders')) delete listenerDetails.responseHeaders
+          if (!extraInfoSpec.includes('requestBody')) delete listenerDetails.requestBody
+
+          callback(listenerDetails)
+        }
+
+        this.listenerMap.set(callback, listener)
+        electron.addExtensionListener(extensionId, this.name, listener)
+      }
+
+      removeListener(callback: Function) {
+        const listener = this.listenerMap.get(callback)
+        if (!listener) return
+        this.listenerMap.delete(callback)
+        electron.removeExtensionListener(extensionId, this.name, listener)
+      }
+
+      hasListener(callback: Function) {
+        return this.listenerMap.has(callback)
+      }
+
+      hasListeners() {
+        return this.listenerMap.size > 0
+      }
+    }
+
     // chrome.types.ChromeSetting<any>
     class ChromeSetting {
       set() {}
@@ -615,7 +741,24 @@ export const injectExtensionAPIs = () => {
         factory: (base) => {
           return {
             ...base,
-            onHeadersReceived: new ExtensionEvent('webRequest.onHeadersReceived'),
+            handlerBehaviorChanged: (callback?: () => void) => {
+              // Observational implementation without an in-memory cache to
+              // invalidate. Provided for API compatibility.
+              if (callback) queueMicrotask(callback)
+              return Promise.resolve()
+            },
+            MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20,
+            // NOTE: onAuthRequired is registered for API compatibility, but
+            // never emits—Electron provides no session.webRequest equivalent.
+            onAuthRequired: new WebRequestEvent('webRequest.onAuthRequired'),
+            onBeforeRedirect: new WebRequestEvent('webRequest.onBeforeRedirect'),
+            onBeforeRequest: new WebRequestEvent('webRequest.onBeforeRequest'),
+            onBeforeSendHeaders: new WebRequestEvent('webRequest.onBeforeSendHeaders'),
+            onCompleted: new WebRequestEvent('webRequest.onCompleted'),
+            onErrorOccurred: new WebRequestEvent('webRequest.onErrorOccurred'),
+            onHeadersReceived: new WebRequestEvent('webRequest.onHeadersReceived'),
+            onResponseStarted: new WebRequestEvent('webRequest.onResponseStarted'),
+            onSendHeaders: new WebRequestEvent('webRequest.onSendHeaders'),
           }
         },
       },

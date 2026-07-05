@@ -8,6 +8,7 @@ import { BrowserActionAPI } from './api/browser-action'
 import { TabsAPI } from './api/tabs'
 import { WindowsAPI } from './api/windows'
 import { WebNavigationAPI } from './api/web-navigation'
+import { WebRequestAPI } from './api/web-request'
 import { ExtensionStore } from './store'
 import { ContextMenusAPI } from './api/context-menus'
 import { RuntimeAPI } from './api/runtime'
@@ -130,6 +131,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     runtime: RuntimeAPI
     tabs: TabsAPI
     webNavigation: WebNavigationAPI
+    webRequest: WebRequestAPI
     windows: WindowsAPI
   }
 
@@ -167,6 +169,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       runtime: new RuntimeAPI(this.ctx),
       tabs: new TabsAPI(this.ctx),
       webNavigation: new WebNavigationAPI(this.ctx),
+      webRequest: new WebRequestAPI(this.ctx),
       windows: new WindowsAPI(this.ctx),
     }
 
