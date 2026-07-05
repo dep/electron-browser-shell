@@ -284,11 +284,33 @@ export const injectExtensionAPIs = () => {
 
     // chrome.types.ChromeSetting<any>
     class ChromeSetting {
-      set() {}
-      get() {}
-      clear() {}
+      // Electron doesn't back these preferences, so report them as out of the
+      // extension's control. Must return promises (or invoke callbacks) —
+      // extensions chain on them (e.g. `get({}).then(...)`).
+      get(details?: any, callback?: any) {
+        if (typeof details === 'function') callback = details
+        const result = { value: false, levelOfControl: 'not_controllable' }
+        if (callback) {
+          queueMicrotask(() => callback(result))
+        }
+        return Promise.resolve(result)
+      }
+      set(details?: any, callback?: any) {
+        if (callback) {
+          queueMicrotask(() => callback())
+        }
+        return Promise.resolve()
+      }
+      clear(details?: any, callback?: any) {
+        if (callback) {
+          queueMicrotask(() => callback())
+        }
+        return Promise.resolve()
+      }
       onChange = {
         addListener: () => {},
+        removeListener: () => {},
+        hasListener: () => false,
       }
     }
 
@@ -785,6 +807,14 @@ export const injectExtensionAPIs = () => {
       },
     }
 
+    // Chromium may expose a native `browser` global aliasing the same APIs as
+    // `chrome` but as a distinct object. Cross-browser extensions commonly
+    // prefer it (`globalThis.browser || globalThis.chrome`), so inject into
+    // both or those extensions would see only the unpatched native APIs.
+    const namespaces = [chrome, (globalThis as any).browser].filter(
+      (ns) => typeof ns === 'object' && ns !== null,
+    )
+
     // Initialize APIs
     Object.keys(apiDefinitions).forEach((key: any) => {
       const apiName: keyof typeof chrome = key
@@ -794,16 +824,22 @@ export const injectExtensionAPIs = () => {
       // Allow APIs to opt-out of being available in this context.
       if (api.shouldInject && !api.shouldInject()) return
 
-      Object.defineProperty(chrome, apiName, {
-        value: api.factory(baseApi),
-        enumerable: true,
-        configurable: true,
-      })
+      const value = api.factory(baseApi)
+      for (const ns of namespaces) {
+        Object.defineProperty(ns, apiName, {
+          value,
+          enumerable: true,
+          configurable: true,
+        })
+      }
     })
 
     // Remove access to internals
     delete (globalThis as any).electron
 
+    // Freeze `chrome` only. Chromium leaves `browser` configurable, and
+    // extensions that wrap it in a Proxy (returning substitute objects from
+    // `get`) would violate the proxy invariant for frozen properties.
     Object.freeze(chrome)
 
     void 0 // no return
