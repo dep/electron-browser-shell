@@ -1,4 +1,5 @@
 import { app, ipcMain, Session } from 'electron'
+import { EventEmitter } from 'node:events'
 import debug from 'debug'
 
 import { resolvePartition } from './partition'
@@ -220,6 +221,17 @@ export class ExtensionRouter {
   private listeners: Map<EventName, EventListener[]> = new Map()
 
   /**
+   * Emits notifications when extension event listeners change.
+   *
+   * - 'listener-added' (eventName: string, extensionId: string)
+   * - 'listener-removed' (eventName: string, extensionId: string)
+   *
+   * Used by APIs which need to lazily set up backing implementations only
+   * while extension listeners exist.
+   */
+  readonly events = new EventEmitter()
+
+  /**
    * Collection of all extension hosts in the session.
    *
    * Currently the router has no ability to wake up non-persistent background
@@ -272,7 +284,7 @@ export class ExtensionRouter {
   private filterListeners(predicate: (listener: EventListener) => boolean) {
     for (const [eventName, listeners] of this.listeners) {
       const filteredListeners = listeners.filter(predicate)
-      const delta = listeners.length - filteredListeners.length
+      const removedListeners = listeners.filter((listener) => !predicate(listener))
 
       if (filteredListeners.length > 0) {
         this.listeners.set(eventName, filteredListeners)
@@ -280,8 +292,12 @@ export class ExtensionRouter {
         this.listeners.delete(eventName)
       }
 
-      if (delta > 0) {
-        d(`removed ${delta} listener(s) for '${eventName}'`)
+      if (removedListeners.length > 0) {
+        d(`removed ${removedListeners.length} listener(s) for '${eventName}'`)
+
+        for (const listener of removedListeners) {
+          this.events.emit('listener-removed', eventName, listener.extensionId)
+        }
       }
     }
   }
@@ -319,6 +335,7 @@ export class ExtensionRouter {
       if (listener.type === 'frame' && listener.host) {
         this.observeListenerHost(listener.host)
       }
+      this.events.emit('listener-added', eventName, extensionId)
     }
   }
 
@@ -336,6 +353,7 @@ export class ExtensionRouter {
     if (index >= 0) {
       d(`removing '${eventName}' event listener for ${extensionId}`)
       eventListeners.splice(index, 1)
+      this.events.emit('listener-removed', eventName, extensionId)
     }
 
     if (eventListeners.length === 0) {
